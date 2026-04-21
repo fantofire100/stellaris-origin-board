@@ -256,6 +256,21 @@
     border-color: var(--claimed-border);
   }
 
+.origin-card.is-blocked {
+  background: rgba(255, 60, 60, 0.08);
+  border-color: rgba(255, 60, 60, 0.5);
+}
+
+.origin-card.is-blocked::before {
+  background: linear-gradient(90deg, transparent, #ff4a4a, transparent);
+  opacity: 0.7;
+}
+
+.is-blocked .status-dot {
+  background: #ff4a4a;
+  box-shadow: 0 0 6px #ff4a4a;
+}
+
   .origin-card.is-claimed::before {
     background: linear-gradient(90deg, transparent, var(--claimed-text), transparent);
     opacity: 0.6;
@@ -801,7 +816,7 @@ let isAdmin = false;
 
 const ORIGINS = [
 // BASE GAME
-{ name: "Prosperous Unification", dlc: "Base Game", desc: "Through its strife and triumphs, this society has reached every young civilization's ambition: a homeworld unified under a single banner." },
+{ name: "Exterminator", dlc: "Base Game", desc: "Any type of exterminator." },
 { name: "Lost Colony", dlc: "Base Game", desc: "This civilization originated as a lost and forgotten colony, separated from its homeworld long ago." },
 { name: "Galactic Doorstep", dlc: "Base Game", desc: "A dormant Gateway lies within the home system, offering both opportunity and potential danger." },
 
@@ -1026,11 +1041,14 @@ function renderGrid() {
   noResults.style.display = filtered.length === 0 ? "block" : "none";
 
   filtered.forEach((origin, i) => {
-    const isClaimed = !!claims[origin.name];
-	const isOwner = isClaimed && claims[origin.name].user_id === currentUserId;
-	const canRelease = isOwner || isAdmin;
+const isClaimed = !!claims[origin.name];
+const isOwner = isClaimed && claims[origin.name].user_id === currentUserId;
+const canRelease = isOwner || isAdmin;
+const isBlocked = isClaimed && claims[origin.name].discord_name === "No";
     const card = document.createElement("div");
-    card.className = "origin-card" + (isClaimed ? " is-claimed" : "");
+   card.className = "origin-card" +
+  (isClaimed ? " is-claimed" : "") +
+  (isBlocked ? " is-blocked" : "");
     card.dataset.origin = origin.name;
     card.style.animationDelay = (i * 0.025) + "s";
 
@@ -1046,7 +1064,7 @@ function renderGrid() {
         <div class="claim-status">
           <span class="status-dot"></span>
 ${isClaimed
-  ? `<span style="color:var(--muted);font-size:12px;">
+  ? `<span style="color:${isBlocked ? '#ff4a4a' : 'var(--muted)'};font-size:12px;">
        Claimed${(isAdmin || isOwner) ? ` — ${claims[origin.name].discord_name}` : ""}
      </span>`
   : `<span style="color:var(--muted);font-size:12px;">Available</span>`
