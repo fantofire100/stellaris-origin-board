@@ -417,6 +417,10 @@
   text-decoration: underline;
 }
 
+.origin-name.exterminator {
+  color: #ff4a4a;
+}
+
 
   /* Modal */
   .modal-overlay {
@@ -1056,7 +1060,9 @@ const isBlocked = isClaimed && claims[origin.name].discord_name === "No";
 
     card.innerHTML = `
       <div class="card-header">
-        <div class="origin-name">${origin.name}</div>
+        <div class="origin-name ${origin.name === 'Exterminator' ? 'exterminator' : ''}">
+  ${origin.name}
+</div>
         <span class="dlc-badge ${dlcClass}">${origin.dlc}</span>
       </div>
       <div class="origin-desc">${origin.desc}</div>
