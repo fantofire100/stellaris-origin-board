@@ -26,13 +26,14 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'Rajdhani', sans-serif;
-    font-size: 15px;
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 15px;
+  min-height: 100vh;
+  overflow-x: hidden;
+  padding-bottom: 96px;
+}
 
   /* Starfield */
   body::before {
@@ -539,18 +540,21 @@
   .btn-confirm:hover { background: rgba(79,163,232,0.25); box-shadow: 0 0 16px rgba(79,163,232,0.2); }
 
   /* Keycode footer */
-  .keycode-footer {
-    position: relative;
-    z-index: 1;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
-    padding: 20px 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
+.keycode-footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
 
   .keycode-label {
     font-size: 12px;
@@ -581,20 +585,24 @@
 
   .keycode-input:focus { border-color: var(--accent); }
 
-  .keycode-btn {
-    background: rgba(200,168,75,0.1);
-    border: 1px solid var(--gold);
-    color: var(--gold);
-    padding: 8px 18px;
-    font-family: 'Rajdhani', sans-serif;
-    font-size: 12px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
+ .keycode-btn {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 6px 14px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
 
-  .keycode-btn:hover { background: rgba(200,168,75,0.2); }
+.keycode-btn:hover {
+  background: rgba(79,163,232,0.15);
+  box-shadow: 0 0 12px rgba(79,163,232,0.2);
+}
 
   .keycode-status {
     font-size: 12px;
@@ -639,7 +647,7 @@
     display: none;
   }
   
-  #admin-clear-btn {
+#admin-clear-btn {
   color: #ff4a4a;
   border-color: rgba(255, 50, 50, 0.4);
 }
@@ -765,6 +773,11 @@
   </button>
 </div>
 
+<div class="search-wrap">
+  <h2 style="color: var(--gold); font-family: 'Cinzel', serif;">Exclusive Systems</h2>
+</div>
+
+<div class="grid-container" id="system-grid"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
@@ -909,7 +922,7 @@ const ORIGINS = [
 // INFERNALS
 { name: "Red Giant", dlc: "Infernals", desc: "This civilization's home system is dominated by an unstable red giant star threatening their survival." },
 { name: "Cosmic Dawn", dlc: "Infernals", desc: "Awakened from stasis, this civilization must rebuild in a galaxy that has moved on without them." }
-  
+
 ];
 
 
@@ -939,11 +952,38 @@ const DLC_CLASS = {
   "Infernals": "dlc-infernals",
 };
 
+const SYSTEMS = [
+  { name: "Sol", desc: "The birthplace of humanity and one of the most iconic systems in Stellaris." },
+  { name: "Deneb", desc: "A classic starting system centered on the bright star Deneb." },
+  { name: "Titawin", desc: "A notable trinary-inspired system option with distinct strategic flavor." }
+];
+
+async function loadSystemClaims() {
+  const { data, error } = await db
+    .from("system_claims")
+    .select("*");
+
+  if (error) {
+    console.error("loadSystemClaims error:", error);
+    return;
+  }
+
+  systemClaims = {};
+  data.forEach(row => {
+    systemClaims[row.system] = {
+      user_id: row.user_id,
+      discord_name: row.discord_name
+    };
+  });
+}
+
 // State
 let claims = {}; // { originName: playerName }
 let activeFilter = "all";
 let searchQuery = "";
 let pendingOrigin = null;
+let systemClaims = {};
+let pendingSystem = null;
 
 async function loadClaims() {
   const { data, error } = await db
@@ -1105,6 +1145,7 @@ function openModal(originName) {
 function closeModal() {
   document.getElementById("modal").classList.remove("open");
   pendingOrigin = null;
+  pendingSystem = null;
 }
 
 async function confirmClaim() {
@@ -1118,10 +1159,15 @@ async function confirmClaim() {
 
   if (pendingOrigin) {
     const success = await saveClaim(pendingOrigin, name);
-
     if (success) {
       await loadClaims();
       renderGrid();
+    }
+  } else if (pendingSystem) {
+    const success = await saveSystemClaim(pendingSystem, name);
+    if (success) {
+      await loadSystemClaims();
+      renderSystemGrid();
     }
   }
 
@@ -1151,6 +1197,102 @@ async function confirmAdminLogin() {
   closeAdminModal();
 }
 
+function renderSystemGrid() {
+  const grid = document.getElementById("system-grid");
+  grid.innerHTML = "";
+
+  SYSTEMS.forEach((system, i) => {
+    const isClaimed = !!systemClaims[system.name];
+    const isOwner = isClaimed && systemClaims[system.name].user_id === currentUserId;
+    const canRelease = isOwner || isAdmin;
+
+    const card = document.createElement("div");
+    card.className = "origin-card" + (isClaimed ? " is-claimed" : "");
+    card.dataset.system = system.name;
+    card.style.animationDelay = (i * 0.025) + "s";
+
+    card.innerHTML = `
+      <div class="card-header">
+        <div class="origin-name">${system.name}</div>
+        <span class="dlc-badge dlc-base">System</span>
+      </div>
+      <div class="origin-desc">${system.desc}</div>
+      <div class="card-footer">
+        <div class="claim-status">
+          <span class="status-dot"></span>
+          ${isClaimed
+            ? `<span style="color:var(--muted);font-size:12px;">
+                 Claimed${(isAdmin || isOwner) ? ` — ${systemClaims[system.name].discord_name}` : ""}
+               </span>`
+            : `<span style="color:var(--muted);font-size:12px;">Available</span>`
+          }
+        </div>
+        <div class="footer-btns">
+          ${isClaimed
+            ? `<button class="unclaim-btn unclaim-system-btn" data-system="${system.name}" style="${canRelease ? 'display:inline-block' : 'display:none'}">Release</button>`
+: `<button class="claim-btn claim-system-btn" data-system="${system.name}">Claim</button>`
+          }
+        </div>
+      </div>
+    `;
+
+    grid.appendChild(card);
+  });
+}
+
+async function saveSystemClaim(systemName, discordName) {
+  if (isAdmin) {
+    const adminPassword = localStorage.getItem("stellaris_admin_pw");
+
+    if (!adminPassword) {
+      alert("Admin session missing password. Please log in again.");
+      return false;
+    }
+
+    const { data, error } = await db.rpc("admin_claim_system", {
+      pw: adminPassword,
+      system_name: systemName,
+      discord_name_in: discordName
+    });
+
+    if (error) {
+      console.error("admin_claim_system error:", error);
+      alert("Admin system claim failed.");
+      return false;
+    }
+
+    if (!data) {
+      alert("Admin password was rejected.");
+      return false;
+    }
+
+    return true;
+  }
+
+  const { data: userData, error: userError } = await db.auth.getUser();
+
+  if (userError || !userData.user) {
+    alert("Could not identify your browser session.");
+    return false;
+  }
+
+  const { error } = await db
+    .from("system_claims")
+    .insert([{
+      system: systemName,
+      user_id: userData.user.id,
+      discord_name: discordName
+    }]);
+
+  if (error) {
+    alert(error.message);
+    console.error("saveSystemClaim error:", error);
+    return false;
+  }
+
+  return true;
+}
+
 async function loginWithAdminPassword(password) {
   const { data, error } = await db.rpc("check_admin", {
     pw: password
@@ -1169,17 +1311,21 @@ async function loginWithAdminPassword(password) {
   localStorage.setItem("stellaris_admin_pw", password);
 
   await loadClaims();
+  await loadSystemClaims();
   updateAdminButtons();
   renderGrid();
+  renderSystemGrid();
   return true;
 }
 async function logoutAdmin() {
   isAdmin = false;
-localStorage.removeItem("stellaris_admin_pw");
+  localStorage.removeItem("stellaris_admin_pw");
 
   await loadClaims();
+  await loadSystemClaims();
   updateAdminButtons();
   renderGrid();
+  renderSystemGrid();
 }
 
 
@@ -1227,16 +1373,32 @@ async function releaseClaim(originName) {
 }
 
 // Event delegation
-document.getElementById("grid").addEventListener("click", e => {
-  const claimBtn = e.target.closest(".claim-btn");
-  const unclaimBtn = e.target.closest(".unclaim-btn");
+document.addEventListener("click", e => {
+  const claimSystemBtn = e.target.closest(".claim-system-btn");
+  const unclaimSystemBtn = e.target.closest(".unclaim-system-btn");
+  const claimBtn = e.target.closest(".claim-btn:not(.claim-system-btn)");
+  const unclaimBtn = e.target.closest(".unclaim-btn:not(.unclaim-system-btn)");
+
+  if (claimSystemBtn && !claimSystemBtn.disabled) {
+    openSystemModal(claimSystemBtn.dataset.system);
+    return;
+  }
+
+  if (unclaimSystemBtn) {
+    releaseSystemClaim(unclaimSystemBtn.dataset.system);
+    return;
+  }
+
   if (claimBtn && !claimBtn.disabled) {
     openModal(claimBtn.dataset.origin);
+    return;
   }
+
   if (unclaimBtn) {
     releaseClaim(unclaimBtn.dataset.origin);
   }
 });
+
 document.getElementById("admin-login-btn").addEventListener("click", openAdminModal);
 document.getElementById("admin-logout-btn").addEventListener("click", logoutAdmin);
 
@@ -1279,33 +1441,86 @@ function updateAdminButtons() {
   document.getElementById("admin-clear-btn").style.display = isAdmin ? "inline-block" : "none";
 }
 
-async function clearAllClaims() {
-  if (!confirm("⚠ Are you sure you want to delete ALL claims? This cannot be undone.")) return;
+function openSystemModal(systemName) {
+  pendingSystem = systemName;
+  pendingOrigin = null;
+  document.getElementById("modal-origin-name").textContent = systemName;
+  document.getElementById("player-name").value = "";
+  document.getElementById("player-name").classList.remove("error");
+  document.getElementById("modal-error").classList.remove("show");
+  document.getElementById("modal").classList.add("open");
+  setTimeout(() => document.getElementById("player-name").focus(), 100);
+}
 
-  const adminPassword = localStorage.getItem("stellaris_admin_pw");
+async function releaseSystemClaim(systemName) {
+  if (!confirm(`Release claim on "${systemName}"?`)) return;
 
-  if (!adminPassword) {
-    alert("Admin session missing password. Please log in again.");
-    return;
+  if (isAdmin) {
+    const adminPassword = localStorage.getItem("stellaris_admin_pw");
+
+    if (!adminPassword) {
+      alert("Admin session missing password. Please log in again.");
+      return;
+    }
+
+    const { data, error } = await db.rpc("admin_release_system_claim", {
+      pw: adminPassword,
+      system_name: systemName
+    });
+
+    if (error) {
+      console.error("admin_release_system_claim error:", error);
+      alert("Admin system release failed.");
+      return;
+    }
+
+    if (!data) {
+      alert("Admin password rejected.");
+      return;
+    }
+  } else {
+    const { error } = await db
+      .from("system_claims")
+      .delete()
+      .eq("system", systemName);
+
+    if (error) {
+      alert(error.message);
+      console.error("releaseSystemClaim error:", error);
+      return;
+    }
   }
 
+  await loadSystemClaims();
+  renderSystemGrid();
+}
+
+async function clearAllClaims() {
+  const wipePassword = prompt("Enter wipe password to clear ALL claims:");
+
+  if (!wipePassword) return;
+
+  if (!confirm("⚠ Are you sure you want to delete ALL origin and system claims? This cannot be undone.")) return;
+
   const { data, error } = await db.rpc("admin_clear_claims", {
-    pw: adminPassword
+    wipe_pw: wipePassword
   });
 
   if (error) {
-   console.error("admin_clear_claims full error:", JSON.stringify(error, null, 2));
-alert(error?.message || "Failed to clear claims.");
+    console.error("admin_clear_claims full error:", JSON.stringify(error, null, 2));
+    alert(error?.message || "Failed to clear claims.");
     return;
   }
 
   if (!data) {
-    alert("Admin password rejected.");
+    alert("Wipe password rejected.");
     return;
   }
 
   await loadClaims();
+  await loadSystemClaims();
   renderGrid();
+  renderSystemGrid();
 }
 
 document.getElementById("admin-clear-btn").addEventListener("click", clearAllClaims);
@@ -1322,13 +1537,14 @@ async function init() {
   if (!ok) return;
 
   currentUserId = await getCurrentUserId();
-isAdmin = !!localStorage.getItem("stellaris_admin_pw");
+  isAdmin = !!localStorage.getItem("stellaris_admin_pw");
 
   await loadClaims();
+  await loadSystemClaims();
   updateAdminButtons();
   renderGrid();
+  renderSystemGrid();
 }
-
 init();
 </script>
 </body>
