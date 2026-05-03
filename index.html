@@ -859,6 +859,9 @@ const ORIGINS = [
 { name: "Life-Seeded", dlc: "Apocalypse", desc: "This civilization's homeworld is a perfect Gaia World, seemingly designed specifically for them." },
 { name: "Post-Apocalyptic", dlc: "Apocalypse", desc: "Baptized by nuclear fire, this civilization survived total annihilation and rebuilt from the ashes." },
 
+//ANCIENT RELICS
+{ name: "Remnants", dlc: "Federations", desc: "Once rulers of a vast empire, this civilization now rises from the ruins of a fallen age, seeking to reclaim its lost glory among the stars." },
+
 // FEDERATIONS
 { name: "Doomsday", dlc: "Federations", desc: "This civilization's homeworld is highly unstable and will eventually be destroyed." },
 { name: "On the Shoulders of Giants", dlc: "Federations", desc: "Hidden boons and secrets lie scattered throughout this civilization's home system." },
@@ -1059,8 +1062,13 @@ async function saveClaim(origin, discordName) {
 }
 
 function updateStats() {
-  const total = ORIGINS.length;
-  const claimedCount = Object.keys(claims).length;
+  const realOrigins = ORIGINS.filter(o => o.name !== "Exterminator");
+  const total = realOrigins.length;
+
+  const claimedCount = realOrigins.filter(origin =>
+    claims[origin.name] && claims[origin.name].discord_name !== "No"
+  ).length;
+
   document.getElementById("total-count").textContent = total;
   document.getElementById("claimed-count").textContent = claimedCount;
   document.getElementById("free-count").textContent = total - claimedCount;
@@ -1074,10 +1082,12 @@ function renderGrid() {
   grid.querySelectorAll(".origin-card").forEach(c => c.remove());
 
   const filtered = ORIGINS.filter(o => {
-    const matchFilter = activeFilter === "all" ||
-      (activeFilter === "claimed" && claims[o.name]) ||
-      (activeFilter === "unclaimed" && !claims[o.name]) ||
-      o.dlc === activeFilter;
+    const isSpecial = o.name === "Exterminator";
+
+const matchFilter = activeFilter === "all" ||
+  (activeFilter === "claimed" && !isSpecial && claims[o.name] && claims[o.name].discord_name !== "No") ||
+  (activeFilter === "unclaimed" && !isSpecial && (!claims[o.name] || claims[o.name].discord_name === "No")) ||
+  o.dlc === activeFilter;
     const matchSearch = !searchQuery || o.name.toLowerCase().includes(searchQuery) || o.dlc.toLowerCase().includes(searchQuery);
     return matchFilter && matchSearch;
   });
