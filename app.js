@@ -2,7 +2,7 @@ const SUPABASE_URL = "https://nwwxtmlghmtdkjoyivja.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im53d3h0bWxnaG10ZGtqb3lpdmphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3NzcyNTAsImV4cCI6MjA5MjM1MzI1MH0.dbqeqA_4-imfjYTXzgH_lWS9sJO4lB6dDoQ3Zeb-8ow";
 
 const ADMIN_PASSWORD_STORAGE_KEY = "stellaris_admin_pw";
-const BLOCKED_DISCORD_NAME = "No";
+const BLOCKED_DISCORD_NAME = ""!!Block"";
 
 const FILTER_ALL = "all";
 const FILTER_AVAILABLE = "unclaimed";
