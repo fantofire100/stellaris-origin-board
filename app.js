@@ -313,6 +313,9 @@ function describeClaim(claim, canManage) {
   if (!claim) {
     return "Available";
   }
+  if (claim.isBlocked) {
+    return "Unavailable";
+  }
   return canManage ? `Claimed — ${claim.discordName}` : "Claimed";
 }
 
