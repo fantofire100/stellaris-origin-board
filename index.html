@@ -28,6 +28,10 @@
       <span class="stat-num" id="free-count">0</span>
       <span class="stat-label">Available</span>
     </div>
+    <div class="stat">
+      <span class="stat-num stat-num--blocked" id="blocked-count">0</span>
+      <span class="stat-label">Unavailable</span>
+    </div>
   </div>
 
   <p class="wiki-link">
@@ -35,10 +39,15 @@
   </p>
 </header>
 
+<div class="banner" id="load-banner" role="alert" hidden>
+  <span>Couldn't load the latest claims, so statuses below are unknown.</span>
+  <button class="btn btn--accent" type="button" id="load-retry">Retry</button>
+</div>
+
 <nav class="filters" id="filters" aria-label="Origin filters"></nav>
 
 <div class="search-bar">
-  <input class="search-input" type="text" id="search-input" placeholder="Search origins..." autocomplete="off">
+  <input class="search-input" type="search" id="search-input" placeholder="Search origins..." aria-label="Search origins" autocomplete="off">
 </div>
 
 <main>
@@ -53,13 +62,15 @@
   </section>
 </main>
 
+<!-- Claim -->
 <div class="modal-overlay" id="claim-modal">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="claim-title">
     <h2 class="modal-title" id="claim-title">Claim Origin</h2>
     <p class="modal-subject" id="claim-subject"></p>
     <label class="modal-label" for="claim-name">Discord Username</label>
-    <input class="modal-input" type="text" id="claim-name" placeholder="Enter your Discord username..." maxlength="40" autocomplete="off">
-    <p class="modal-error" id="claim-error" hidden>Please enter your name.</p>
+    <input class="modal-input" type="text" id="claim-name" placeholder="Enter the Discord username..." maxlength="40" autocomplete="off">
+    <p class="modal-error" id="claim-error" role="alert" hidden>Please enter a name.</p>
+    <p class="modal-hint">You can claim as many as you like, including on behalf of someone else.</p>
     <div class="modal-actions">
       <button class="btn btn--cancel" type="button" id="claim-cancel">Cancel</button>
       <button class="btn btn--confirm" type="button" id="claim-confirm">Claim</button>
@@ -67,12 +78,13 @@
   </div>
 </div>
 
+<!-- Admin login -->
 <div class="modal-overlay" id="admin-modal">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-title">
     <h2 class="modal-title" id="admin-title">Admin Login</h2>
     <label class="modal-label" for="admin-password">Password</label>
     <input class="modal-input" type="password" id="admin-password" placeholder="Enter admin password..." autocomplete="current-password">
-    <p class="modal-error" id="admin-error" hidden>Login failed.</p>
+    <p class="modal-error" id="admin-error" role="alert" hidden>Login failed.</p>
     <div class="modal-actions">
       <button class="btn btn--cancel" type="button" id="admin-cancel">Cancel</button>
       <button class="btn btn--confirm" type="button" id="admin-confirm">Login</button>
@@ -80,8 +92,37 @@
   </div>
 </div>
 
+<!-- Wipe -->
+<div class="modal-overlay" id="wipe-modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="wipe-title">
+    <h2 class="modal-title" id="wipe-title">Clear All Claims</h2>
+    <p class="modal-subject modal-subject--danger">Deletes every origin and system claim. This cannot be undone.</p>
+    <label class="modal-label" for="wipe-password">Wipe password</label>
+    <input class="modal-input" type="password" id="wipe-password" placeholder="Enter wipe password..." autocomplete="off">
+    <p class="modal-error" id="wipe-error" role="alert" hidden>Wipe password was rejected.</p>
+    <div class="modal-actions">
+      <button class="btn btn--cancel" type="button" id="wipe-cancel">Cancel</button>
+      <button class="btn btn--confirm btn--confirm-danger" type="button" id="wipe-confirm">Delete everything</button>
+    </div>
+  </div>
+</div>
+
+<!-- Admin panel -->
+<div class="modal-overlay" id="panel-modal">
+  <div class="modal modal--wide" role="dialog" aria-modal="true" aria-labelledby="panel-title" tabindex="-1" id="panel-dialog">
+    <div class="panel-head">
+      <h2 class="modal-title" id="panel-title">Admin Panel</h2>
+      <button class="btn btn--cancel" type="button" id="panel-close" aria-label="Close admin panel">Close ✕</button>
+    </div>
+    <div class="panel-body" id="panel-body"></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
 <footer class="admin-bar">
   <button class="btn btn--accent" type="button" id="admin-login">Admin Login</button>
+  <button class="btn btn--accent" type="button" id="admin-panel" hidden>🛰 Admin Panel</button>
   <button class="btn btn--accent" type="button" id="admin-logout" hidden>Admin Logout</button>
   <button class="btn btn--accent btn--alert" type="button" id="admin-clear" hidden>⚠ Clear All Claims</button>
 </footer>
@@ -93,17 +134,21 @@
       <span class="badge"></span>
     </div>
     <p class="card-desc"></p>
+    <p class="card-meta" hidden></p>
     <div class="card-footer">
       <div class="card-status">
         <span class="status-dot"></span>
         <span class="card-status-text"></span>
       </div>
-      <button class="btn" type="button"></button>
+      <div class="card-actions">
+        <button class="btn card-block btn--block" type="button" data-action="block" hidden>Block</button>
+        <button class="btn card-action" type="button"></button>
+      </div>
     </div>
   </article>
 </template>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2"></script>
 <script src="app.js"></script>
 </body>
 </html>
