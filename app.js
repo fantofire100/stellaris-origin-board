@@ -1,3 +1,5 @@
+"use strict";
+
 const SUPABASE_URL = "https://nwwxtmlghmtdkjoyivja.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im53d3h0bWxnaG10ZGtqb3lpdmphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3NzcyNTAsImV4cCI6MjA5MjM1MzI1MH0.dbqeqA_4-imfjYTXzgH_lWS9sJO4lB6dDoQ3Zeb-8ow";
 
@@ -7,6 +9,7 @@ const BLOCKED_DISCORD_NAME = "!!Block";
 const FILTER_ALL = "all";
 const FILTER_AVAILABLE = "unclaimed";
 const FILTER_CLAIMED = "claimed";
+const FILTER_BLOCKED = "blocked";
 
 const CLAIM_KINDS = {
   origin: {
@@ -15,7 +18,8 @@ const CLAIM_KINDS = {
     nameParam: "origin_name",
     claimRpc: "admin_claim_origin",
     releaseRpc: "admin_release_claim",
-    modalTitle: "Claim Origin"
+    modalTitle: "Claim Origin",
+    noun: "Origin"
   },
   system: {
     table: "system_claims",
@@ -23,7 +27,8 @@ const CLAIM_KINDS = {
     nameParam: "system_name",
     claimRpc: "admin_claim_system",
     releaseRpc: "admin_release_system_claim",
-    modalTitle: "Claim System"
+    modalTitle: "Claim System",
+    noun: "System"
   }
 };
 
@@ -59,6 +64,7 @@ const FILTERS = [
   { value: FILTER_ALL, label: "All" },
   { value: FILTER_AVAILABLE, label: "Available" },
   { value: FILTER_CLAIMED, label: "Claimed" },
+  { value: FILTER_BLOCKED, label: "Unavailable" },
   ...DLCS.map(dlc => ({ value: dlc.name, label: dlc.filterLabel ?? dlc.name }))
 ];
 
@@ -148,25 +154,131 @@ const SYSTEMS = [
 
 const SYSTEM_BADGE = { label: "System", cssKey: "base" };
 
+/* ------------------------------------------------------------------ state */
+
 const state = {
   currentUserId: null,
   isAdmin: false,
   activeFilter: FILTER_ALL,
   searchQuery: "",
   claims: { origin: new Map(), system: new Map() },
-  pendingClaim: null
+  loaded: { origin: false, system: false },
+  loadFailed: false,
+  pendingClaim: null,
+  realtime: "connecting"
 };
 
 const latestRequestIds = { origin: 0, system: 0 };
+const refreshTimers = {};
+const entranceTimers = {};
 
-const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const db = window.supabase?.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) ?? null;
 
 const adminSession = {
-  isActive: () => Boolean(localStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY)),
-  getPassword: () => localStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY),
-  start: password => localStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, password),
-  end: () => localStorage.removeItem(ADMIN_PASSWORD_STORAGE_KEY)
+  isActive: () => Boolean(adminSession.getPassword()),
+  getPassword: () => {
+    try { return localStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY); } catch { return null; }
+  },
+  start: password => {
+    try { localStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, password); } catch { /* storage blocked */ }
+  },
+  end: () => {
+    try { localStorage.removeItem(ADMIN_PASSWORD_STORAGE_KEY); } catch { /* storage blocked */ }
+  }
 };
+
+/* --------------------------------------------------------------- helpers */
+
+function byId(id) {
+  return document.getElementById(id);
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text != null) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+function formatDate(iso) {
+  if (!iso) {
+    return "";
+  }
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+const shortId = id => (id ? String(id).slice(0, 8) : "?");
+const isReservedName = name => name.trim().toLowerCase() === BLOCKED_DISCORD_NAME.toLowerCase();
+
+const elements = {
+  totalCount: byId("total-count"),
+  claimedCount: byId("claimed-count"),
+  freeCount: byId("free-count"),
+  blockedCount: byId("blocked-count"),
+  filters: byId("filters"),
+  searchInput: byId("search-input"),
+  originGrid: byId("origin-grid"),
+  systemGrid: byId("system-grid"),
+  emptyState: byId("empty-state"),
+  cardTemplate: byId("card-template"),
+  claimTitle: byId("claim-title"),
+  claimSubject: byId("claim-subject"),
+  adminLogin: byId("admin-login"),
+  adminLogout: byId("admin-logout"),
+  adminClear: byId("admin-clear"),
+  adminPanel: byId("admin-panel"),
+  panelBody: byId("panel-body"),
+  panelDialog: byId("panel-dialog"),
+  toasts: byId("toasts"),
+  loadBanner: byId("load-banner"),
+  loadRetry: byId("load-retry")
+};
+
+function toast(message, type = "info") {
+  const node = el("div", `toast toast--${type}`, message);
+  node.setAttribute("role", type === "error" ? "alert" : "status");
+  elements.toasts.append(node);
+  setTimeout(() => node.remove(), type === "error" ? 6000 : 3500);
+}
+
+function friendlyError(error) {
+  const code = error?.cause?.code ?? error?.code;
+  if (code === "23505") {
+    return "Someone just claimed that one. The board has been refreshed.";
+  }
+  if (code === "42501") {
+    return "You're not allowed to do that.";
+  }
+  if (code === "23514") {
+    return "That name isn't allowed. Use 1–40 characters, and not the reserved block marker.";
+  }
+  if (code === "P0002" || code === "NOT_RELEASED") {
+    return "That couldn't be released. It may already be free, or it belongs to someone else.";
+  }
+  if (error instanceof TypeError || /failed to fetch|network|load failed/i.test(error?.message ?? "")) {
+    return "Network problem. Check your connection and try again.";
+  }
+  return error?.message || "Something went wrong.";
+}
+
+function needsRefresh(error) {
+  const code = error?.cause?.code ?? error?.code;
+  return code === "23505" || code === "P0002" || code === "NOT_RELEASED";
+}
+
+function adminRejected(message, endsSession) {
+  const error = new Error(message);
+  error.name = "AdminRejected";
+  error.endsSession = endsSession;
+  return error;
+}
 
 function unwrap({ data, error }) {
   if (error) {
@@ -174,6 +286,8 @@ function unwrap({ data, error }) {
   }
   return data;
 }
+
+/* ------------------------------------------------------------- data layer */
 
 async function ensureAnonymousSession() {
   const { session } = unwrap(await db.auth.getSession());
@@ -188,6 +302,7 @@ function toClaim(row) {
   return {
     userId: row.user_id,
     discordName: row.discord_name,
+    createdAt: row.created_at ?? null,
     isBlocked: row.discord_name === BLOCKED_DISCORD_NAME
   };
 }
@@ -211,22 +326,24 @@ async function deleteClaim(kind, name) {
   const { table, column } = CLAIM_KINDS[kind];
   const deletedRows = unwrap(await db.from(table).delete().eq(column, name).select());
   if (deletedRows.length === 0) {
-    throw new Error("This claim could not be released.");
+    const error = new Error("This claim could not be released.");
+    error.code = "NOT_RELEASED";
+    throw error;
   }
 }
 
 function requireAdminPassword() {
   const password = adminSession.getPassword();
   if (!password) {
-    throw new Error("Admin session is missing its password. Please log in again.");
+    throw adminRejected("Admin session is missing its password. Please log in again.", true);
   }
   return password;
 }
 
-async function callApprovedRpc(functionName, params, rejectionMessage) {
+async function callApprovedRpc(functionName, params, rejectionMessage, endsSession = true) {
   const approved = unwrap(await db.rpc(functionName, params));
   if (!approved) {
-    throw new Error(rejectionMessage);
+    throw adminRejected(rejectionMessage, endsSession);
   }
 }
 
@@ -239,7 +356,7 @@ async function adminInsertClaim(kind, name, discordName) {
   await callApprovedRpc(
     claimRpc,
     { pw: requireAdminPassword(), [nameParam]: name, discord_name_in: discordName },
-    "Admin password was rejected."
+    "Admin password was rejected. Please log in again."
   );
 }
 
@@ -248,58 +365,95 @@ async function adminDeleteClaim(kind, name) {
   await callApprovedRpc(
     releaseRpc,
     { pw: requireAdminPassword(), [nameParam]: name },
-    "Admin password was rejected."
+    "Admin password was rejected. Please log in again."
   );
 }
 
-async function adminClearAllClaims(wipePassword) {
-  await callApprovedRpc("admin_clear_claims", { wipe_pw: wipePassword }, "Wipe password was rejected.");
+async function adminReleaseClaimant(claimantName) {
+  const count = unwrap(await db.rpc("admin_release_user_claims", {
+    pw: requireAdminPassword(),
+    claimant: claimantName
+  }));
+  if (count < 0) {
+    throw adminRejected("Admin password was rejected. Please log in again.", true);
+  }
+  return count;
 }
 
-function subscribeToClaimChanges(onChange) {
+async function adminClearAllClaims(wipePassword) {
+  await callApprovedRpc("admin_clear_claims", { wipe_pw: wipePassword }, "Wipe password was rejected.", false);
+}
+
+/* --------------------------------------------------------------- realtime */
+
+function scheduleRefresh(kind) {
+  clearTimeout(refreshTimers[kind]);
+  refreshTimers[kind] = setTimeout(() => refreshClaims(kind), 150);
+}
+
+function subscribeToClaimChanges() {
   const channel = db.channel("claims-channel");
   Object.entries(CLAIM_KINDS).forEach(([kind, { table }]) => {
-    channel.on("postgres_changes", { event: "*", schema: "public", table }, () => onChange(kind));
+    channel.on("postgres_changes", { event: "*", schema: "public", table }, () => scheduleRefresh(kind));
   });
-  channel.subscribe();
+
+  let wasSubscribed = false;
+  channel.subscribe(status => {
+    state.realtime = status;
+    if (status === "SUBSCRIBED") {
+      if (wasSubscribed) {
+        refreshAllClaims(); // catch up on anything missed while disconnected
+      }
+      wasSubscribed = true;
+    }
+    renderPanelIfOpen();
+  });
 }
 
-function byId(id) {
-  return document.getElementById(id);
-}
-
-const elements = {
-  totalCount: byId("total-count"),
-  claimedCount: byId("claimed-count"),
-  freeCount: byId("free-count"),
-  filters: byId("filters"),
-  searchInput: byId("search-input"),
-  originGrid: byId("origin-grid"),
-  systemGrid: byId("system-grid"),
-  emptyState: byId("empty-state"),
-  cardTemplate: byId("card-template"),
-  claimTitle: byId("claim-title"),
-  claimSubject: byId("claim-subject"),
-  adminLogin: byId("admin-login"),
-  adminLogout: byId("admin-logout"),
-  adminClear: byId("admin-clear")
-};
+/* ------------------------------------------------------------ derived data */
 
 function isTaken(claim) {
   return Boolean(claim) && !claim.isBlocked;
+}
+
+function getOriginStats() {
+  const countable = ORIGINS.filter(origin => !origin.isSpecial);
+  let claimed = 0;
+  let blocked = 0;
+  for (const origin of countable) {
+    const claim = state.claims.origin.get(origin.name);
+    if (!claim) {
+      continue;
+    }
+    if (claim.isBlocked) {
+      blocked++;
+    } else {
+      claimed++;
+    }
+  }
+  return {
+    total: countable.length,
+    claimed,
+    blocked,
+    available: countable.length - claimed - blocked
+  };
 }
 
 function matchesFilter(origin) {
   if (state.activeFilter === FILTER_ALL) {
     return true;
   }
-  if (state.activeFilter === FILTER_CLAIMED) {
-    return !origin.isSpecial && isTaken(state.claims.origin.get(origin.name));
+  const claim = state.claims.origin.get(origin.name);
+  switch (state.activeFilter) {
+    case FILTER_CLAIMED:
+      return !origin.isSpecial && isTaken(claim);
+    case FILTER_AVAILABLE:
+      return !origin.isSpecial && !claim;
+    case FILTER_BLOCKED:
+      return !origin.isSpecial && Boolean(claim?.isBlocked);
+    default:
+      return origin.dlc === state.activeFilter;
   }
-  if (state.activeFilter === FILTER_AVAILABLE) {
-    return !origin.isSpecial && !isTaken(state.claims.origin.get(origin.name));
-  }
-  return origin.dlc === state.activeFilter;
 }
 
 function matchesSearch(origin) {
@@ -309,7 +463,10 @@ function matchesSearch(origin) {
     || origin.dlc.toLowerCase().includes(query);
 }
 
-function describeClaim(claim, canManage) {
+function describeClaim(kind, claim, canManage) {
+  if (!state.loaded[kind]) {
+    return state.loadFailed ? "Status unknown" : "Loading…";
+  }
   if (!claim) {
     return "Available";
   }
@@ -319,14 +476,30 @@ function describeClaim(claim, canManage) {
   return canManage ? `Claimed — ${claim.discordName}` : "Claimed";
 }
 
+function describeAdminMeta(claim) {
+  const when = formatDate(claim.createdAt);
+  const parts = claim.isBlocked
+    ? [`Blocker name: ${claim.discordName}`]
+    : [`Claimed by ${claim.discordName}`, `acct ${shortId(claim.userId)}`];
+  if (when) {
+    parts.push(when);
+  }
+  return parts.join(" · ");
+}
+
+/* --------------------------------------------------------------- rendering */
+
 function buildCard({ kind, name, description, badge, isSpecial = false, index }) {
-  const claim = state.claims[kind].get(name);
+  const known = state.loaded[kind];
+  const claim = known ? state.claims[kind].get(name) : undefined;
   const isOwner = Boolean(claim) && claim.userId === state.currentUserId;
-  const canManage = isOwner || state.isAdmin;
+  const canManage = known && (isOwner || state.isAdmin);
 
   const card = elements.cardTemplate.content.firstElementChild.cloneNode(true);
   const badgeElement = card.querySelector(".badge");
-  const actionButton = card.querySelector("button");
+  const actionButton = card.querySelector(".card-action");
+  const blockButton = card.querySelector(".card-block");
+  const meta = card.querySelector(".card-meta");
 
   card.dataset.kind = kind;
   card.dataset.name = name;
@@ -337,26 +510,44 @@ function buildCard({ kind, name, description, badge, isSpecial = false, index })
 
   card.querySelector(".card-name").textContent = name;
   card.querySelector(".card-desc").textContent = description;
-  card.querySelector(".card-status-text").textContent = describeClaim(claim, canManage);
+  card.querySelector(".card-status-text").textContent = describeClaim(kind, claim, canManage);
+
+  meta.hidden = !(state.isAdmin && claim);
+  if (!meta.hidden) {
+    meta.textContent = describeAdminMeta(claim);
+  }
 
   badgeElement.classList.add(`badge--${badge.cssKey}`);
   badgeElement.textContent = badge.label;
 
-  actionButton.dataset.action = claim ? "release" : "claim";
-  actionButton.textContent = claim ? "Release" : "Claim";
-  actionButton.classList.add(claim ? "btn--release" : "btn--accent");
-  actionButton.hidden = Boolean(claim) && !canManage;
+  if (claim) {
+    const verb = claim.isBlocked ? "Unblock" : "Release";
+    actionButton.dataset.action = "release";
+    actionButton.textContent = verb;
+    actionButton.classList.add("btn--release");
+    actionButton.setAttribute("aria-label", `${verb} ${name}`);
+    actionButton.hidden = !canManage;
+  } else {
+    actionButton.dataset.action = "claim";
+    actionButton.textContent = "Claim";
+    actionButton.classList.add("btn--accent");
+    actionButton.setAttribute("aria-label", `Claim ${name}`);
+    actionButton.hidden = !known;
+  }
+
+  blockButton.hidden = !(known && state.isAdmin && !claim);
+  blockButton.setAttribute("aria-label", `Block ${name}`);
 
   return card;
 }
 
 function renderStats() {
-  const countableOrigins = ORIGINS.filter(origin => !origin.isSpecial);
-  const claimedTotal = countableOrigins.filter(origin => isTaken(state.claims.origin.get(origin.name))).length;
-
-  elements.totalCount.textContent = countableOrigins.length;
-  elements.claimedCount.textContent = claimedTotal;
-  elements.freeCount.textContent = countableOrigins.length - claimedTotal;
+  const stats = getOriginStats();
+  const loaded = state.loaded.origin;
+  elements.totalCount.textContent = stats.total;
+  elements.claimedCount.textContent = loaded ? stats.claimed : "–";
+  elements.freeCount.textContent = loaded ? stats.available : "–";
+  elements.blockedCount.textContent = loaded ? stats.blocked : "–";
 }
 
 function renderOrigins() {
@@ -391,17 +582,29 @@ function renderSystems() {
 }
 
 const renderers = { origin: renderOrigins, system: renderSystems };
+const grids = { origin: elements.originGrid, system: elements.systemGrid };
 
 function renderAll() {
   Object.values(renderers).forEach(render => render());
+  renderPanelIfOpen();
+}
+
+// The fade-in only plays when a grid first receives real data, not on every
+// re-render (search keystrokes, realtime updates, filter clicks).
+function playEntrance(kind) {
+  grids[kind].classList.add("is-entering");
+  clearTimeout(entranceTimers[kind]);
+  entranceTimers[kind] = setTimeout(() => grids[kind].classList.remove("is-entering"), 1200);
 }
 
 function renderFilters() {
   const buttons = FILTERS.map(({ value, label }) => {
     const button = document.createElement("button");
+    const isActive = value === state.activeFilter;
     button.type = "button";
     button.className = "filter-btn";
-    button.classList.toggle("is-active", value === state.activeFilter);
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
     button.dataset.filter = value;
     button.textContent = label;
     return button;
@@ -414,7 +617,22 @@ function updateAdminControls() {
   elements.adminLogin.hidden = state.isAdmin;
   elements.adminLogout.hidden = !state.isAdmin;
   elements.adminClear.hidden = !state.isAdmin;
+  elements.adminPanel.hidden = !state.isAdmin;
 }
+
+function showLoadError(message) {
+  state.loadFailed = true;
+  elements.loadBanner.querySelector("span").textContent = message;
+  elements.loadBanner.hidden = false;
+  renderAll();
+}
+
+function clearLoadError() {
+  state.loadFailed = false;
+  elements.loadBanner.hidden = true;
+}
+
+/* ------------------------------------------------------------------ actions */
 
 async function refreshClaims(kind) {
   const requestId = ++latestRequestIds[kind];
@@ -423,10 +641,22 @@ async function refreshClaims(kind) {
     if (requestId !== latestRequestIds[kind]) {
       return;
     }
+    const firstLoad = !state.loaded[kind];
     state.claims[kind] = claims;
+    state.loaded[kind] = true;
+    if (Object.values(state.loaded).every(Boolean)) {
+      clearLoadError();
+    }
+    if (firstLoad) {
+      playEntrance(kind);
+    }
     renderers[kind]();
+    renderPanelIfOpen();
   } catch (error) {
     console.error(`Could not load ${kind} claims:`, error);
+    if (!state.loaded[kind]) {
+      showLoadError("Couldn't load the latest claims, so statuses below are unknown.");
+    }
   }
 }
 
@@ -437,9 +667,16 @@ function refreshAllClaims() {
 async function attempt(action) {
   try {
     await action();
+    return true;
   } catch (error) {
     console.error(error);
-    alert(error.message);
+    toast(friendlyError(error), "error");
+    if (error.endsSession) {
+      endAdminSession("Admin session ended. Please log in again.");
+    } else if (needsRefresh(error)) {
+      await refreshAllClaims();
+    }
+    return false;
   }
 }
 
@@ -451,11 +688,14 @@ function submitClaim({ kind, name }, discordName) {
       await insertClaim(kind, name, discordName);
     }
     await refreshClaims(kind);
+    toast(`Claimed ${name}.`, "success");
   });
 }
 
 async function releaseClaim(kind, name) {
-  if (!confirm(`Release claim on "${name}"?`)) {
+  const claim = state.claims[kind].get(name);
+  const verb = claim?.isBlocked ? "Unblock" : "Release claim on";
+  if (!confirm(`${verb} "${name}"?`)) {
     return;
   }
 
@@ -466,85 +706,188 @@ async function releaseClaim(kind, name) {
       await deleteClaim(kind, name);
     }
     await refreshClaims(kind);
+    toast(claim?.isBlocked ? `Unblocked ${name}.` : `Released ${name}.`, "success");
   });
 }
 
-async function loginAsAdmin(password) {
-  let verified = false;
-  try {
-    verified = await verifyAdminPassword(password);
-  } catch (error) {
-    console.error(error);
-  }
-
-  if (!verified) {
-    return false;
-  }
-
-  adminSession.start(password);
-  state.isAdmin = true;
-  updateAdminControls();
-  renderAll();
-  await refreshAllClaims();
-  return true;
-}
-
-async function logoutAdmin() {
-  adminSession.end();
-  state.isAdmin = false;
-  updateAdminControls();
-  renderAll();
-  await refreshAllClaims();
-}
-
-async function clearAllClaims() {
-  const wipePassword = prompt("Enter wipe password to clear ALL claims:");
-  if (!wipePassword) {
-    return;
-  }
-
-  if (!confirm("⚠ Are you sure you want to delete ALL origin and system claims? This cannot be undone.")) {
+async function blockEntry(kind, name) {
+  if (!confirm(`Block "${name}"? It will show as Unavailable to everyone.`)) {
     return;
   }
 
   await attempt(async () => {
-    await adminClearAllClaims(wipePassword);
-    await refreshAllClaims();
+    await adminInsertClaim(kind, name, BLOCKED_DISCORD_NAME);
+    await refreshClaims(kind);
+    toast(`Blocked ${name}.`, "success");
   });
 }
 
-function createModal({ overlay, input, error, confirmButton, cancelButton, onSubmit, onClose }) {
+async function releaseClaimant(claimantName, count) {
+  if (!confirm(`Release all ${count} claim${count === 1 ? "" : "s"} made under "${claimantName}"?`)) {
+    return;
+  }
+
+  await attempt(async () => {
+    const removed = await adminReleaseClaimant(claimantName);
+    await refreshAllClaims();
+    toast(`Released ${removed} claim${removed === 1 ? "" : "s"} for ${claimantName}.`, "success");
+  });
+}
+
+function enterAdminMode() {
+  state.isAdmin = true;
+  updateAdminControls();
+  renderAll();
+}
+
+function endAdminSession(message) {
+  adminSession.end();
+  state.isAdmin = false;
+  panelModal.close();
+  updateAdminControls();
+  renderAll();
+  if (message) {
+    toast(message, "info");
+  }
+}
+
+async function loginAsAdmin(password) {
+  let verified;
+  try {
+    verified = await verifyAdminPassword(password);
+  } catch (error) {
+    console.error(error);
+    return { ok: false, reason: "network" };
+  }
+
+  if (!verified) {
+    return { ok: false, reason: "wrong" };
+  }
+
+  adminSession.start(password);
+  enterAdminMode();
+  toast("Logged in as admin.", "success");
+  return { ok: true };
+}
+
+function logoutAdmin() {
+  endAdminSession("Logged out.");
+}
+
+// Re-check a saved admin password so a rotated/removed password doesn't leave
+// the admin UI showing while every action fails.
+async function restoreAdminSession() {
+  const password = adminSession.getPassword();
+  if (!password) {
+    return;
+  }
+
+  try {
+    if (await verifyAdminPassword(password)) {
+      enterAdminMode();
+    } else {
+      endAdminSession("Saved admin session is no longer valid. Please log in again.");
+    }
+  } catch (error) {
+    console.error(error);
+    toast("Couldn't verify your saved admin session. Showing the public view.", "error");
+  }
+}
+
+/* ------------------------------------------------------------------- modals */
+
+function createModal({ overlay, input, error, confirmButton, cancelButton, onSubmit, onClose, onOpen }) {
+  const dialog = overlay.querySelector('[role="dialog"]');
+  let returnFocus = null;
+  let busy = false;
+
+  const focusable = () => [...dialog.querySelectorAll("button, input, summary")]
+    .filter(node => !node.disabled && node.offsetParent !== null);
+
   const modal = {
+    get isOpen() {
+      return overlay.classList.contains("open");
+    },
     open() {
-      input.value = "";
+      returnFocus = document.activeElement;
+      if (input) {
+        input.value = "";
+      }
       modal.setInvalid(false);
       overlay.classList.add("open");
-      input.focus();
+      onOpen?.();
+      (input ?? dialog).focus();
     },
     close() {
+      if (!modal.isOpen) {
+        return;
+      }
       overlay.classList.remove("open");
       onClose?.();
+      returnFocus?.focus?.();
+      returnFocus = null;
     },
-    setInvalid(isInvalid) {
-      input.classList.toggle("is-invalid", isInvalid);
+    setInvalid(isInvalid, message) {
+      if (!error) {
+        return;
+      }
+      if (message) {
+        error.textContent = message;
+      }
+      input?.classList.toggle("is-invalid", isInvalid);
       error.hidden = !isInvalid;
     }
   };
 
-  const submit = () => onSubmit(input.value, modal);
+  async function submit() {
+    if (busy || !onSubmit) {
+      return;
+    }
+    busy = true;
+    confirmButton.disabled = true;
+    try {
+      await onSubmit(input.value, modal);
+    } finally {
+      busy = false;
+      confirmButton.disabled = false;
+      // Disabling the focused button drops focus to <body>, which would stop
+      // Escape/Tab from reaching the modal. Put it back.
+      if (modal.isOpen && !dialog.contains(document.activeElement)) {
+        (input ?? dialog).focus();
+      }
+    }
+  }
 
-  confirmButton.addEventListener("click", submit);
-  cancelButton.addEventListener("click", modal.close);
+  confirmButton?.addEventListener("click", submit);
+  cancelButton?.addEventListener("click", modal.close);
   overlay.addEventListener("click", event => {
     if (event.target === overlay) {
       modal.close();
     }
   });
-  input.addEventListener("keydown", event => {
-    if (event.key === "Enter") {
-      submit();
-    } else if (event.key === "Escape") {
+  overlay.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
       modal.close();
+    } else if (event.key === "Enter" && input && event.target === input) {
+      event.preventDefault();
+      submit();
+    } else if (event.key === "Tab") {
+      const nodes = focusable();
+      if (nodes.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
   });
 
@@ -554,7 +897,11 @@ function createModal({ overlay, input, error, confirmButton, cancelButton, onSub
 function handleClaimSubmit(rawName, modal) {
   const discordName = rawName.trim();
   if (!discordName) {
-    modal.setInvalid(true);
+    modal.setInvalid(true, "Please enter a name.");
+    return;
+  }
+  if (!state.isAdmin && isReservedName(discordName)) {
+    modal.setInvalid(true, "That name is reserved.");
     return;
   }
 
@@ -564,11 +911,45 @@ function handleClaimSubmit(rawName, modal) {
 }
 
 async function handleAdminSubmit(password, modal) {
-  if (await loginAsAdmin(password)) {
-    modal.close();
-  } else {
-    modal.setInvalid(true);
+  if (!password) {
+    modal.setInvalid(true, "Enter the password.");
+    return;
   }
+
+  const result = await loginAsAdmin(password);
+  if (result.ok) {
+    modal.close();
+  } else if (result.reason === "network") {
+    modal.setInvalid(true, "Couldn't reach the server. Try again.");
+  } else {
+    modal.setInvalid(true, "Wrong password.");
+  }
+}
+
+async function handleWipeSubmit(password, modal) {
+  if (!password) {
+    modal.setInvalid(true, "Enter the wipe password.");
+    return;
+  }
+  if (!confirm("⚠ Delete ALL origin and system claims? This cannot be undone.")) {
+    return;
+  }
+
+  try {
+    await adminClearAllClaims(password);
+  } catch (error) {
+    if (error.name === "AdminRejected") {
+      modal.setInvalid(true, error.message);
+    } else {
+      console.error(error);
+      toast(friendlyError(error), "error");
+    }
+    return;
+  }
+
+  modal.close();
+  toast("All claims cleared.", "success");
+  await refreshAllClaims();
 }
 
 const claimModal = createModal({
@@ -590,12 +971,285 @@ const adminModal = createModal({
   onSubmit: handleAdminSubmit
 });
 
+const wipeModal = createModal({
+  overlay: byId("wipe-modal"),
+  input: byId("wipe-password"),
+  error: byId("wipe-error"),
+  confirmButton: byId("wipe-confirm"),
+  cancelButton: byId("wipe-cancel"),
+  onSubmit: handleWipeSubmit
+});
+
+const panelModal = createModal({
+  overlay: byId("panel-modal"),
+  cancelButton: byId("panel-close"),
+  onOpen: () => renderAdminPanel()
+});
+
 function openClaimModal(kind, name) {
   state.pendingClaim = { kind, name };
   elements.claimTitle.textContent = CLAIM_KINDS[kind].modalTitle;
   elements.claimSubject.textContent = name;
   claimModal.open();
 }
+
+/* -------------------------------------------------------------- admin panel */
+
+const panelOpenKeys = new Set(["overview", "blocked"]);
+
+function disclosure(key, summaryNodes, bodyNode, className = "panel-section") {
+  const details = el("details", className);
+  details.dataset.key = key;
+  details.open = panelOpenKeys.has(key);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      panelOpenKeys.add(key);
+    } else {
+      panelOpenKeys.delete(key);
+    }
+  });
+  const summary = el("summary");
+  summary.append(...summaryNodes);
+  details.append(summary, bodyNode);
+  return details;
+}
+
+function allEntries() {
+  const entries = [];
+  for (const kind of Object.keys(CLAIM_KINDS)) {
+    const catalogNames = new Set((kind === "origin" ? ORIGINS : SYSTEMS).map(item => item.name));
+    for (const [name, claim] of state.claims[kind]) {
+      entries.push({ kind, name, ...claim, inCatalog: catalogNames.has(name) });
+    }
+  }
+  return entries;
+}
+
+function releaseButton(entry) {
+  const button = el("button", "btn btn--release", entry.isBlocked ? "Unblock" : "Release");
+  button.type = "button";
+  button.dataset.panelAction = "release";
+  button.dataset.kind = entry.kind;
+  button.dataset.name = entry.name;
+  button.setAttribute("aria-label", `${entry.isBlocked ? "Unblock" : "Release"} ${entry.name}`);
+  return button;
+}
+
+function entryRow(entry, detail) {
+  const row = el("li", "panel-row");
+  const text = el("div", "panel-row__text");
+  const title = el("div", "panel-row__title");
+  title.append(
+    el("span", "panel-row__name", entry.name),
+    el("span", "panel-tag", CLAIM_KINDS[entry.kind].noun)
+  );
+  if (!entry.inCatalog) {
+    title.append(el("span", "panel-tag panel-tag--warn", "not in catalog"));
+  }
+  text.append(title);
+  if (detail) {
+    text.append(el("div", "panel-row__sub", detail));
+  }
+  row.append(text, releaseButton(entry));
+  return row;
+}
+
+function entryList(entries, detailFor) {
+  const list = el("ul", "panel-list");
+  list.append(...entries.map(entry => entryRow(entry, detailFor(entry))));
+  return list;
+}
+
+function emptyNote(text) {
+  return el("p", "panel-note", text);
+}
+
+function buildOverview(entries) {
+  const stats = getOriginStats();
+  const claimedEntries = entries.filter(entry => !entry.isBlocked);
+  const systemsClaimed = claimedEntries.filter(entry => entry.kind === "system").length;
+  const claimants = new Set(claimedEntries.map(entry => entry.discordName.trim().toLowerCase()));
+  const accounts = new Set(claimedEntries.map(entry => entry.userId));
+
+  const tiles = [
+    ["Origins claimed", stats.claimed],
+    ["Origins available", stats.available],
+    ["Origins unavailable", stats.blocked],
+    ["Systems claimed", systemsClaimed],
+    ["Distinct names", claimants.size],
+    ["Browser accounts", accounts.size]
+  ];
+
+  const wrap = el("div");
+  const grid = el("div", "panel-tiles");
+  for (const [label, value] of tiles) {
+    const tile = el("div", "panel-tile");
+    tile.append(el("span", "panel-tile__num", String(value)), el("span", "panel-tile__label", label));
+    grid.append(tile);
+  }
+  wrap.append(
+    grid,
+    emptyNote("Exterminator is a special entry and isn't included in the origin totals. “Browser accounts” counts the anonymous sessions behind the claims; admin-made claims each get their own.")
+  );
+  return wrap;
+}
+
+function buildBlocked(blocked) {
+  const wrap = el("div");
+  const note = el("p", "panel-note");
+  note.append(
+    "Block marker: ",
+    el("code", "panel-code", BLOCKED_DISCORD_NAME),
+    ". An entry whose claimant name is exactly this shows as Unavailable and counts as neither claimed nor available. Use the Block button on any available card to add one."
+  );
+  wrap.append(note);
+  wrap.append(blocked.length
+    ? entryList(blocked, entry => {
+      const when = formatDate(entry.createdAt);
+      return `Blocker name: ${entry.discordName}${when ? ` · ${when}` : ""}`;
+    })
+    : emptyNote("Nothing is blocked right now."));
+  return wrap;
+}
+
+function groupByClaimant(claimedEntries) {
+  const groups = new Map();
+  for (const entry of claimedEntries) {
+    const key = entry.discordName.trim().toLowerCase();
+    if (!groups.has(key)) {
+      groups.set(key, { key, label: entry.discordName.trim(), entries: [], accounts: new Set() });
+    }
+    const group = groups.get(key);
+    group.entries.push(entry);
+    group.accounts.add(entry.userId);
+  }
+  return [...groups.values()].sort((a, b) => b.entries.length - a.entries.length || a.label.localeCompare(b.label));
+}
+
+function buildClaimants(claimedEntries) {
+  const groups = groupByClaimant(claimedEntries);
+  if (groups.length === 0) {
+    return emptyNote("No claims yet.");
+  }
+
+  const wrap = el("div", "panel-groups");
+  for (const group of groups) {
+    const summaryNodes = [
+      el("span", "panel-group__name", group.label),
+      el("span", "panel-count", `${group.entries.length}`)
+    ];
+    if (group.accounts.size > 1) {
+      summaryNodes.push(el("span", "panel-tag panel-tag--warn", `${group.accounts.size} accounts`));
+    }
+
+    const body = el("div", "panel-group__body");
+    body.append(entryList(group.entries, entry => {
+      const when = formatDate(entry.createdAt);
+      return `acct ${shortId(entry.userId)}${when ? ` · ${when}` : ""}`;
+    }));
+
+    const releaseAll = el("button", "btn btn--release", `Release all ${group.entries.length}`);
+    releaseAll.type = "button";
+    releaseAll.dataset.panelAction = "release-claimant";
+    releaseAll.dataset.claimant = group.label;
+    releaseAll.dataset.count = String(group.entries.length);
+    body.append(releaseAll);
+
+    wrap.append(disclosure(`claimant:${group.key}`, summaryNodes, body, "panel-group"));
+  }
+  return wrap;
+}
+
+function buildRecent(entries) {
+  const recent = entries
+    .filter(entry => entry.createdAt)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, 10);
+
+  if (recent.length === 0) {
+    return emptyNote("No timestamps yet. Run supabase.sql to add them, and new claims will show up here.");
+  }
+  return entryList(recent, entry => (entry.isBlocked
+    ? `Blocked · ${formatDate(entry.createdAt)}`
+    : `By ${entry.discordName} · ${formatDate(entry.createdAt)}`));
+}
+
+function buildSession() {
+  const list = el("dl", "panel-facts");
+  const facts = [
+    ["Admin", "Logged in"],
+    ["Your account id", state.currentUserId ?? "none"],
+    ["Realtime", state.realtime],
+    ["Saved in this browser", "Admin password (localStorage). Log out on shared computers."]
+  ];
+  for (const [term, value] of facts) {
+    list.append(el("dt", null, term), el("dd", null, value));
+  }
+  return list;
+}
+
+function renderAdminPanel() {
+  if (!state.isAdmin) {
+    return;
+  }
+
+  const entries = allEntries();
+  const blocked = entries.filter(entry => entry.isBlocked);
+  const claimed = entries.filter(entry => !entry.isBlocked);
+  const orphans = entries.filter(entry => !entry.inCatalog);
+  const section = (key, title, body, count) => {
+    const nodes = [el("span", "panel-section__title", title)];
+    if (count != null) {
+      nodes.push(el("span", "panel-count", String(count)));
+    }
+    return disclosure(key, nodes, body);
+  };
+
+  const sections = [
+    section("overview", "Overview", buildOverview(entries)),
+    section("blocked", "Blocked entries", buildBlocked(blocked), blocked.length),
+    section("claimants", "Claims by name", buildClaimants(claimed), claimed.length),
+    section("recent", "Recent activity", buildRecent(entries))
+  ];
+  if (orphans.length > 0) {
+    sections.push(section(
+      "orphans",
+      "Not in catalog",
+      entryList(orphans, entry => `${entry.isBlocked ? "Blocker name" : "Claimed by"} ${entry.discordName}`),
+      orphans.length
+    ));
+  }
+  sections.push(section("session", "Session", buildSession()));
+
+  const scrollTop = elements.panelDialog.scrollTop;
+  elements.panelBody.replaceChildren(...sections);
+  elements.panelDialog.scrollTop = scrollTop;
+  if (!elements.panelDialog.contains(document.activeElement)) {
+    elements.panelDialog.focus({ preventScroll: true });
+  }
+}
+
+function renderPanelIfOpen() {
+  if (panelModal.isOpen && state.isAdmin) {
+    renderAdminPanel();
+  }
+}
+
+function handlePanelClick(event) {
+  const button = event.target.closest("button[data-panel-action]");
+  if (!button) {
+    return;
+  }
+
+  const { panelAction, kind, name, claimant, count } = button.dataset;
+  if (panelAction === "release") {
+    releaseClaim(kind, name);
+  } else if (panelAction === "release-claimant") {
+    releaseClaimant(claimant, Number(count));
+  }
+}
+
+/* ------------------------------------------------------------------- events */
 
 function handleCardAction(event) {
   const button = event.target.closest("button[data-action]");
@@ -604,10 +1258,15 @@ function handleCardAction(event) {
   }
 
   const { kind, name } = button.closest(".card").dataset;
-  if (button.dataset.action === "claim") {
-    openClaimModal(kind, name);
-  } else {
-    releaseClaim(kind, name);
+  switch (button.dataset.action) {
+    case "claim":
+      openClaimModal(kind, name);
+      break;
+    case "block":
+      blockEntry(kind, name);
+      break;
+    default:
+      releaseClaim(kind, name);
   }
 }
 
@@ -627,6 +1286,24 @@ function handleSearchInput(event) {
   renderOrigins();
 }
 
+async function retryLoad() {
+  if (!db) {
+    location.reload();
+    return;
+  }
+  if (!state.currentUserId) {
+    try {
+      state.currentUserId = await ensureAnonymousSession();
+      subscribeToClaimChanges();
+    } catch (error) {
+      console.error(error);
+      toast(friendlyError(error), "error");
+      return;
+    }
+  }
+  await refreshAllClaims();
+}
+
 function bindEvents() {
   elements.originGrid.addEventListener("click", handleCardAction);
   elements.systemGrid.addEventListener("click", handleCardAction);
@@ -634,25 +1311,38 @@ function bindEvents() {
   elements.searchInput.addEventListener("input", handleSearchInput);
   elements.adminLogin.addEventListener("click", adminModal.open);
   elements.adminLogout.addEventListener("click", logoutAdmin);
-  elements.adminClear.addEventListener("click", clearAllClaims);
+  elements.adminClear.addEventListener("click", wipeModal.open);
+  elements.adminPanel.addEventListener("click", panelModal.open);
+  elements.panelBody.addEventListener("click", handlePanelClick);
+  elements.loadRetry.addEventListener("click", retryLoad);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.currentUserId) {
+      refreshAllClaims();
+    }
+  });
 }
 
 async function init() {
   renderFilters();
   bindEvents();
+  updateAdminControls();
+  renderAll(); // show the catalog immediately, even if the network is slow or down
+
+  if (!db) {
+    showLoadError("Couldn't load the Supabase library. Check your connection and reload.");
+    return;
+  }
 
   try {
     state.currentUserId = await ensureAnonymousSession();
   } catch (error) {
     console.error(error);
-    alert("Could not create anonymous session.");
+    showLoadError("Couldn't start a session, so claiming is unavailable right now.");
     return;
   }
 
-  state.isAdmin = adminSession.isActive();
-  updateAdminControls();
-  subscribeToClaimChanges(refreshClaims);
-  await refreshAllClaims();
+  subscribeToClaimChanges();
+  await Promise.all([refreshAllClaims(), restoreAdminSession()]);
 }
 
 init();
